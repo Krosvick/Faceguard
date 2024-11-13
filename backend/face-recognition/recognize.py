@@ -1,12 +1,20 @@
 import threading
-import queue
+import os
+import json
+from pathlib import Path
+from datetime import datetime
 
-import cv2
-import numpy as np
+import queue
 import torch
+import numpy as np
+import cv2
+from PIL import Image
+from io import BytesIO
+import base64
+from typing import Dict, Optional
 import yaml
-from torchvision import transforms
 import time
+from torchvision import transforms
 
 from face_alignment.alignment import norm_crop
 from face_detection.scrfd.detector import SCRFD
@@ -15,12 +23,16 @@ from face_recognition.arcface.model import iresnet_inference
 from face_recognition.arcface.utils import compare_encodings, read_features
 from face_tracking.tracker.byte_tracker import BYTETracker
 from face_tracking.tracker.visualize import plot_tracking
+import requests
+from urllib.error import URLError
+import backoff
 
 # Device configuration
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Face detector (choose one)
 detector = SCRFD(model_file="face_detection/scrfd/weights/scrfd_2.5g_bnkps.onnx")
+
 # detector = Yolov5Face(model_file="face_detection/yolov5_face/weights/yolov5n-face.pt")
 
 # Face recognizer
@@ -48,8 +60,29 @@ data_lock = threading.Lock()
 
 # Initialize queues
 tracking_queue = queue.Queue(maxsize=10)  # Adjust maxsize as needed
-# recognition_queue = queue.Queue(maxsize=10)  # Removed as it's unused
 
+ROOM_ID = "LC6"
+DISPLAY_CONFIDENCE_THRESHOLD = 0.25  # Lower threshold for display purposes
+RECORD_CONFIDENCE_THRESHOLD = 0.6    # Higher threshold for recording attendance
+RECOGNITION_COOLDOWN = 5  # Seconds between recognitions
+last_recognition_time: Dict[str, datetime] = {}
+best_recognition: Dict[str, Optional[dict]] = {}
+processed_names = set()  # Track which names have been processed
+recognition_results = {}  # Store recognition results
+
+RECORDS_DIR = Path("./attendance_records")
+PENDING_RECORDS_FILE = RECORDS_DIR / "pending_records.json"
+BATCH_SIZE = 10  # Number of records to store before writing to file
+
+# Initialize records directory
+RECORDS_DIR.mkdir(exist_ok=True)
+
+API_BASE_URL = "http://localhost:3000/api"  # Change this to your Next.js API URL
+SEND_INTERVAL = 5  # Seconds between sending batches to API
+MAX_RETRIES = 3
+
+# Add new variable to track class end times
+class_end_times = {}
 
 def load_config(file_name):
     """
@@ -66,7 +99,6 @@ def load_config(file_name):
             return yaml.safe_load(stream)
         except yaml.YAMLError as exc:
             print(exc)
-
 
 def process_tracking(frame, detector, tracker, args, frame_id, fps):
     """
@@ -143,13 +175,13 @@ def process_tracking(frame, detector, tracker, args, frame_id, fps):
         "tracking_ids": tracking_ids,
         "tracking_bboxes": tracking_bboxes
     }
+
     try:
         tracking_queue.put(tracking_data, timeout=1)
     except queue.Full:
         print("Tracking queue is full. Skipping frame.")
 
     return tracking_image
-
 
 @torch.no_grad()
 def get_feature(face_image):
@@ -184,7 +216,6 @@ def get_feature(face_image):
 
     return images_emb
 
-
 def recognition(face_image):
     """
     Recognize a face image.
@@ -199,11 +230,11 @@ def recognition(face_image):
     query_emb = get_feature(face_image)
 
     score, id_min = compare_encodings(query_emb, images_embs)
+
     name = images_names[id_min]
     score = score[0]
 
     return score, name
-
 
 def mapping_bbox(box1, box2):
     """
@@ -237,7 +268,6 @@ def mapping_bbox(box1, box2):
     iou = intersection_area / union_area
 
     return iou
-
 
 def tracking(detector, args):
     """
@@ -284,14 +314,136 @@ def tracking(detector, args):
     cap.release()
     cv2.destroyAllWindows()
 
+def save_face_image(face_image, name: str, quality: float):
+    """Save the face image with timestamp."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"recognized_faces/{name}_{timestamp}_{quality:.2f}.jpg"
+    cv2.imwrite(filename, face_image)
+    return filename
+
+def encode_image_base64(face_image):
+    """
+    Convert CV2 image to base64 string.
+
+    Args:
+        face_image (numpy.ndarray): CV2 image in BGR format
+
+    Returns:
+        str: Base64 encoded image string
+    """
+    # Convert from BGR to RGB
+    rgb_image = cv2.cvtColor(face_image, cv2.COLOR_BGR2RGB)
+
+    # Convert to PIL Image
+    pil_image = Image.fromarray(rgb_image)
+
+    # Create a BytesIO object
+    buffered = BytesIO()
+
+    # Save image to BytesIO object as JPEG
+    pil_image.save(buffered, format="JPEG", quality=95)
+
+    # Encode as base64
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+
+    return img_str
+
+def load_pending_records():
+    """Load pending records from JSON file."""
+    if PENDING_RECORDS_FILE.exists():
+        try:
+            with open(PENDING_RECORDS_FILE, "r") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            return []
+    return []
+
+def save_pending_records(records):
+    """Save pending records to JSON file."""
+    with open(PENDING_RECORDS_FILE, "w") as f:
+        json.dump(records, f, indent=2)
+
+def clear_sent_records(successful_records):
+    """Remove successfully sent records from pending records."""
+    pending_records = load_pending_records()
+    remaining_records = [r for r in pending_records 
+                        if r["timestamp"] not in [sr["timestamp"] for sr in successful_records]]
+    save_pending_records(remaining_records)
+
+@backoff.on_exception(backoff.expo, (requests.exceptions.RequestException, URLError), max_tries=MAX_RETRIES)
+def send_records_to_api(records):
+    """
+    Send records to Next.js API with retry logic.
+    """
+    if not records:
+        return []
+        
+    try:
+        response = requests.post(
+            f"{API_BASE_URL}/attendance/record",
+            json={"records": records},
+            headers={"Content-Type": "application/json"},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('classEndTime'):
+                # Parse the ISO string and convert to timezone-naive datetime
+                end_time = datetime.fromisoformat(data['classEndTime'].replace('Z', '+00:00'))
+                room = records[0]['room']
+                # Store as timezone-naive datetime
+                class_end_times[room] = end_time.replace(tzinfo=None)
+            print(f"Successfully sent {len(records)} records to API")
+            return records
+        else:
+            print(f"Failed to send records. Status: {response.status_code}")
+            return []
+            
+    except Exception as e:
+        print(f"Error sending records to API: {e}")
+        return []
+
+def should_record_attendance(name: str, room: str, current_time: datetime) -> bool:
+    """
+    Determine if attendance should be recorded for a person.
+    """
+    # If person hasn't been processed yet, allow recording
+    if name not in processed_names:
+        return True
+        
+    # If we have a class end time for this room
+    if room in class_end_times:
+        # Ensure current_time is timezone-naive for comparison
+        current_time_naive = current_time.replace(tzinfo=None)
+        # Allow new recording if current time is past the class end time
+        if current_time_naive > class_end_times[room]:
+            # Remove from processed names to allow new recording
+            processed_names.remove(name)
+            return True
+            
+    return False
 
 def recognize():
     """Face recognition in a separate thread."""
+    global processed_names, recognition_results
+    pending_records = load_pending_records()
+    batch_count = 0
+    last_send_time = time.time()
+
     while True:
         try:
             tracking_data = tracking_queue.get(timeout=1)
         except queue.Empty:
-            continue  # No data to process
+            # Check if it's time to send pending records
+            current_time = time.time()
+            if pending_records and (current_time - last_send_time) >= SEND_INTERVAL:
+                successful_records = send_records_to_api(pending_records)
+                if successful_records:
+                    clear_sent_records(successful_records)
+                    pending_records = load_pending_records()
+                last_send_time = current_time
+            continue
 
         try:
             raw_image = tracking_data["raw_image"]
@@ -303,6 +455,9 @@ def recognize():
             faces_to_recognize = []
             ids_to_update = []
             quality_scores = []
+            face_images = []
+
+            current_time = datetime.now()
 
             for i in range(len(tracking_bboxes)):
                 for j in range(len(detection_bboxes)):
@@ -310,30 +465,73 @@ def recognize():
                     if mapping_score > 0.9:
                         face_alignment = norm_crop(img=raw_image, landmark=detection_landmarks[j])
                         
-                        # Check face quality before adding to recognition queue
                         is_quality_ok, quality_score = check_face_quality(face_alignment)
+
                         if is_quality_ok:
                             faces_to_recognize.append(face_alignment)
                             ids_to_update.append(tracking_ids[i])
                             quality_scores.append(quality_score)
-                        else:
-                            print(f"Low quality face detected (score: {quality_score:.2f})")
+                            face_images.append(face_alignment)
                         break
 
             if faces_to_recognize:
-                # Batch processing
                 features = get_feature_batch(faces_to_recognize)
                 scores, names = compare_encodings_batch(features, images_embs)
 
-                for score, name, tid, quality in zip(scores, names, ids_to_update, quality_scores):
-                    caption = "UNKNOWN" if score < 0.25 else f"{name}:{score:.2f} Q:{quality:.2f}"
+                for score, name, tid, quality, face_img in zip(scores, names, ids_to_update, quality_scores, face_images):
+                    if score >= DISPLAY_CONFIDENCE_THRESHOLD:
+                        caption = f"{name}:{score:.2f}"
+                        
+                        if (score >= RECORD_CONFIDENCE_THRESHOLD and 
+                            should_record_attendance(name, ROOM_ID, current_time)):
+                            
+                            face_image_base64 = encode_image_base64(face_img)
+                            
+                            record = {
+                                "name": name,
+                                "confidence": float(score),
+                                "quality": float(quality),
+                                "timestamp": current_time.isoformat(),
+                                "room": ROOM_ID,
+                                "image": face_image_base64,
+                                "status": "pending"
+                            }
+                            
+                            recognition_results[name] = record
+                            pending_records.append(record)
+                            processed_names.add(name)
+                            
+                            batch_count += 1
+                            if batch_count >= BATCH_SIZE:
+                                save_pending_records(pending_records)
+                                batch_count = 0
+                                
+                            # Print the recognition record (excluding the base64 image)
+                            print_record = {**record}
+                            print_record["image"] = "<<base64_image_data>>"
+                            print("New Recognition:", json.dumps(print_record, indent=2))
+                    else:
+                        caption = "UNKNOWN"
+                    
                     id_face_mapping[tid] = caption
 
             if not tracking_bboxes:
                 print("Waiting for a person...")
+
+            # After processing new recognitions, check if it's time to send
+            current_time = time.time()
+            if pending_records and (current_time - last_send_time) >= SEND_INTERVAL:
+                successful_records = send_records_to_api(pending_records)
+                if successful_records:
+                    clear_sent_records(successful_records)
+                    pending_records = load_pending_records()
+                last_send_time = current_time
+
         except Exception as e:
             print(f"Error in recognition thread: {e}")
-
+            # Save any pending records on error
+            if pending_records:
+                save_pending_records(pending_records)
 
 @torch.no_grad()
 def get_feature_batch(face_images):
@@ -366,7 +564,6 @@ def get_feature_batch(face_images):
 
     return images_embs
 
-
 def compare_encodings_batch(features, reference_features):
     """
     Compare batch of features with reference features.
@@ -385,14 +582,13 @@ def compare_encodings_batch(features, reference_features):
 
     return scores, [images_names[idx] for idx in ids_min]
 
-
 def check_face_quality(face_image):
     """
     Check the quality of a face image.
-    
+
     Args:
         face_image (numpy.ndarray): Input face image
-        
+
     Returns:
         bool: True if face quality is acceptable, False otherwise
         float: Quality score
@@ -422,6 +618,19 @@ def check_face_quality(face_image):
     
     return quality_score > 0.6, quality_score
 
+def get_recognition_results():
+    """Get the current recognition results."""
+    return recognition_results
+
+def reset_recognition():
+    """Reset the recognition system for a new session."""
+    global processed_names, recognition_results
+    processed_names.clear()
+    recognition_results.clear()
+    
+    # Clear pending records file
+    if PENDING_RECORDS_FILE.exists():
+        PENDING_RECORDS_FILE.unlink()
 
 def main():
     """Main function to start face tracking and recognition threads."""
@@ -455,6 +664,7 @@ def main():
     thread_track.join()
     thread_recognize.join()
 
-
 if __name__ == "__main__":
     main()
+
+
