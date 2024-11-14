@@ -5,8 +5,12 @@ import { ThemeSwitcher } from "@/components/theme-switcher";
 import { hasEnvVars } from "@/utils/supabase/check-env-vars";
 import { GeistSans } from "geist/font/sans";
 import { ThemeProvider } from "next-themes";
+import { NextUIProvider } from "@nextui-org/react";
+import { FaceLogo } from "@/components/face-logo";
 import Link from "next/link";
+
 import "./globals.css";
+
 
 const defaultUrl = process.env.VERCEL_URL
   ? `https://${process.env.VERCEL_URL}`
@@ -14,8 +18,8 @@ const defaultUrl = process.env.VERCEL_URL
 
 export const metadata = {
   metadataBase: new URL(defaultUrl),
-  title: "Next.js and Supabase Starter Kit",
-  description: "The fastest way to build apps with Next.js and Supabase",
+  title: "FaceGuard",
+  description: "Sistema de asistencia facial automatizado",
 };
 
 export default function RootLayout({
@@ -26,8 +30,9 @@ export default function RootLayout({
   return (
     <html lang="en" className={GeistSans.className} suppressHydrationWarning>
       <body className="bg-background text-foreground">
-        <ThemeProvider
-          attribute="class"
+        <NextUIProvider>
+          <ThemeProvider
+            attribute="class"
           defaultTheme="system"
           enableSystem
           disableTransitionOnChange
@@ -37,10 +42,8 @@ export default function RootLayout({
               <nav className="w-full flex justify-center border-b border-b-foreground/10 h-16">
                 <div className="w-full max-w-5xl flex justify-between items-center p-3 px-5 text-sm">
                   <div className="flex gap-5 items-center font-semibold">
-                    <Link href={"/"}>Next.js Supabase Starter</Link>
-                    <div className="flex items-center gap-2">
-                      <DeployButton />
-                    </div>
+                    <FaceLogo width={60} height={60} />
+                    <Link href={"/"}>FaceGuard</Link>
                   </div>
                   {!hasEnvVars ? <EnvVarWarning /> : <HeaderAuth />}
                 </div>
@@ -65,7 +68,8 @@ export default function RootLayout({
               </footer>
             </div>
           </main>
-        </ThemeProvider>
+          </ThemeProvider>
+        </NextUIProvider>
       </body>
     </html>
   );
