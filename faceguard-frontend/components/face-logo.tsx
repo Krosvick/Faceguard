@@ -15,7 +15,7 @@ export function FaceLogo({
   return (
     <div className={cn("relative", className)}>
       <Image
-        src="/logoface.png"
+        src="/logoface-removebg-preview.png"
         alt="FaceGuard Logo"
         width={width}
         height={height}

@@ -28,15 +28,19 @@ from queue import Queue
 from threading import Thread
 import signal
 
+current_dir = os.path.dirname(os.path.abspath(__file__))
+scrfd_model_path = os.path.join(current_dir, "face_detection", "scrfd", "weights", "scrfd_2.5g_bnkps.onnx")
+arcface_model_path = os.path.join(current_dir, "face_recognition", "arcface", "weights", "arcface_r100.pth")
+
 # Device configuration
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Face detector (choose one)
-detector = SCRFD(model_file="face_detection/scrfd/weights/scrfd_2.5g_bnkps.onnx")
+detector = SCRFD(model_file=scrfd_model_path)
 # detector = Yolov5Face(model_file="face_detection/yolov5_face/weights/yolov5n-face.pt")
 
 # Face recognizer
-recognizer = iresnet_inference(model_name="r100", path="face_recognition/arcface/weights/arcface_r100.pth", device=device)
+recognizer = iresnet_inference(model_name="r100", path=arcface_model_path, device=device)
 
 # Load precomputed face features and names
 images_names, images_embs = read_features(feature_path="./datasets/face_features/feature")
@@ -100,6 +104,7 @@ last_recognition_times = {}  # {name: datetime}
 # Track unknown individuals
 unknown_features = {}  # {temp_id: {"features": np.array, "last_seen": datetime, "count": int}}
 next_unknown_id = 1  # Counter for generating temporary IDs
+
 
 def load_config(file_name):
     with open(file_name, "r") as stream:

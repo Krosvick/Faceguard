@@ -3,28 +3,31 @@
 import { Button } from "@nextui-org/react"
 import { useSupabase } from "@/utils/supabase/client"
 import { useEffect, useState } from "react"
-import { useRouter, usePathname } from "next/navigation"
+import { useRouter } from "next/navigation"
 import Link from "next/link"
 import { Teacher } from "@/types/teacher"
 import { Session } from '@supabase/supabase-js'
 
+interface University {
+  id: number
+  name: string
+  location: string
+  auth_user_id: string
+}
 
 const HeaderAuth = () => {
   const { supabase } = useSupabase()
   const [session, setSession] = useState<Session | null>(null)
-  const [teacher, setTeacher] = useState<Teacher | null>(null)
+  const [userProfile, setUserProfile] = useState<Teacher | University | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const router = useRouter()
-  const pathname = usePathname()
 
   // Handle session changes
   useEffect(() => {
-    // Get initial session
     supabase.auth.getSession().then(({ data: { session: initialSession } }) => {
       setSession(initialSession)
     })
 
-    // Listen for session changes
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
@@ -34,38 +37,51 @@ const HeaderAuth = () => {
     return () => subscription.unsubscribe()
   }, [supabase.auth])
 
-  // Handle teacher data
+  // Handle user profile data
   useEffect(() => {
     let ignore = false
 
-    async function getTeacherData() {
+    async function getUserProfile() {
       try {
         if (!session?.user?.id) {
-          if (!ignore) setTeacher(null)
+          if (!ignore) setUserProfile(null)
           return
         }
 
-        const { data, error } = await supabase
+        // Try to get teacher profile
+        const { data: teacherData, error: teacherError } = await supabase
           .from('teachers')
           .select('*')
           .eq('auth_user_id', session.user.id)
           .single()
 
+        if (!teacherError && teacherData) {
+          if (!ignore) setUserProfile(teacherData)
+          return
+        }
+
+        // If not a teacher, try to get university profile
+        const { data: universityData, error: universityError } = await supabase
+          .from('universities')
+          .select('*')
+          .eq('auth_user_id', session.user.id)
+          .single()
+
         if (!ignore) {
-          if (error) {
-            console.error('Error fetching teacher:', error)
-            setTeacher(null)
+          if (universityError) {
+            console.error('Error fetching user profile:', universityError)
+            setUserProfile(null)
           } else {
-            setTeacher(data)
+            setUserProfile(universityData)
           }
         }
       } catch (error) {
-        console.error('Error in getTeacherData:', error)
-        if (!ignore) setTeacher(null)
+        console.error('Error in getUserProfile:', error)
+        if (!ignore) setUserProfile(null)
       }
     }
 
-    getTeacherData()
+    getUserProfile()
 
     return () => {
       ignore = true
@@ -76,7 +92,7 @@ const HeaderAuth = () => {
     try {
       setIsLoading(true)
       await supabase.auth.signOut()
-      setTeacher(null)
+      setUserProfile(null)
       router.push('/')
       router.refresh()
     } catch (error) {
@@ -104,8 +120,8 @@ const HeaderAuth = () => {
     )
   }
 
-  // Show loading state while fetching teacher data
-  if (!teacher) {
+  // Show loading state while fetching user data
+  if (!userProfile) {
     return (
       <div className="flex items-center gap-4">
         <Button
@@ -125,13 +141,44 @@ const HeaderAuth = () => {
   return (
     <div className="flex items-center gap-4">
       <span className="text-sm text-default-500">
-        Bienvenido, {teacher.first_name} {teacher.last_name}
+        Bienvenido, {
+          'first_name' in userProfile 
+            ? `${userProfile.first_name} ${userProfile.last_name}`
+            : userProfile.name
+        }
       </span>
-      <Link href="/assignatures">
-        <Button variant="bordered" size="sm">
-          Mis Asignaturas
-        </Button>
-      </Link>
+      {'first_name' in userProfile ? (
+        <div className="flex gap-2">
+          <Link href="/assignatures">
+            <Button variant="bordered" size="sm">
+              Mis Asignaturas
+            </Button>
+          </Link>
+          <Link href="/rooms">
+            <Button variant="bordered" size="sm">
+              Mis Salas
+            </Button>
+          </Link>
+        </div>
+      ) : (
+        <div className="flex gap-2">
+          <Link href="/students">
+            <Button variant="bordered" size="sm">
+              Registrar Estudiantes
+            </Button>
+          </Link>
+          <Link href="/students/list">
+            <Button variant="bordered" size="sm">
+              Ver Estudiantes
+            </Button>
+          </Link>
+          <Link href="/rooms">
+            <Button variant="bordered" size="sm">
+              Gestionar Salas
+            </Button>
+          </Link>
+        </div>
+      )}
       <Button
         color="danger"
         variant="flat"

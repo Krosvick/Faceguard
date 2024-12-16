@@ -1,36 +1,28 @@
-import { writeFile } from 'fs/promises'
-import path from 'path'
-
-const IMAGES_DIR = path.join(process.cwd(), 'public', 'attendance-images')
-
-export async function saveBase64Image(
-  base64Data: string, 
-  name: string, 
-  timestamp: string
-): Promise<string> {
+export async function uploadStudentImage(file: File, studentName: string): Promise<string> {
   try {
-    // Create a URL-friendly filename
-    const sanitizedName = name.toLowerCase().replace(/[^a-z0-9]/g, '-')
-    const filename = `${sanitizedName}-${timestamp}.jpg`
-    
-    // Create relative path for database storage
-    const relativePath = `/attendance-images/${filename}`
-    
-    // Create absolute path for file writing
-    const absolutePath = path.join(IMAGES_DIR, filename)
-    
-    // Remove base64 header if present
-    const base64Image = base64Data.replace(/^data:image\/\w+;base64,/, '')
-    
-    // Convert base64 to buffer
-    const imageBuffer = Buffer.from(base64Image, 'base64')
-    
-    // Write file
-    await writeFile(absolutePath, imageBuffer)
-    
-    return relativePath
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('studentName', studentName)
+
+    const response = await fetch('/api/upload', {
+      method: 'POST',
+      body: formData,
+    })
+
+    if (!response.ok) {
+      const error = await response.json()
+      throw new Error(error.error || 'Error uploading image')
+    }
+
+    const data = await response.json()
+    return data.path
   } catch (error) {
-    console.error('Error saving image:', error)
-    throw new Error('Failed to save image')
+    console.error('Error uploading image:', error)
+    throw error
   }
+}
+
+// Helper function to ensure consistent path formatting
+export function formatStudentName(firstName: string, lastName: string): string {
+  return `${firstName}_${lastName}`.trim().replace(/\s+/g, '_')
 } 

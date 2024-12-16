@@ -232,7 +232,8 @@ def iresnet_inference(model_name, path, device="cuda"):
     else:
         raise ValueError()
 
-    weight = torch.load(path, map_location=device)
+    # Load weights with weights_only=True for security
+    weight = torch.load(path, map_location=device, weights_only=True)
 
     model.load_state_dict(weight)
     model.to(device)

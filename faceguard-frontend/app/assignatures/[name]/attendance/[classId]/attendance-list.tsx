@@ -1,15 +1,8 @@
 "use client"
 
-import { Card, CardBody, CardHeader, Chip } from "@nextui-org/react"
+import { Card, CardBody, Chip } from "@nextui-org/react"
 import { useSupabase } from "@/utils/supabase/client"
 import { useEffect, useState } from "react"
-import { Clock } from "lucide-react"
-
-interface Class {
-  start_time: string
-  end_time: string
-  room: string
-}
 
 interface Attendance {
   id: number
@@ -18,18 +11,16 @@ interface Attendance {
   quality: number
   timestamp: string
   image_path: string
-  room: string
-  class_id: number
+  room_id: number
 }
 
-interface AttendanceListProps {
+export interface AttendanceListProps {
   classId: string
 }
 
 const AttendanceList = ({ classId }: AttendanceListProps) => {
   const { supabase } = useSupabase()
   const [attendances, setAttendances] = useState<Attendance[]>([])
-  const [classDetails, setClassDetails] = useState<Class | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -39,29 +30,16 @@ const AttendanceList = ({ classId }: AttendanceListProps) => {
         setIsLoading(true)
         setError(null)
 
-        const { data: classData, error: classError } = await supabase
-          .from('classes')
-          .select('*')
-          .eq('id', classId)
-          .single()
+        const { data: attendanceData, error: attendanceError } = await supabase
+          .from('attendance')
+          .select('id, student_name, confidence, quality, timestamp, image_path, room_id')
+          .eq('room_id', classId)
+          .order('timestamp', { ascending: false })
 
-        if (classError) throw classError
+        if (attendanceError) throw attendanceError
 
-        if (classData) {
-          setClassDetails(classData)
-          
-          const { data: attendanceData, error: attendanceError } = await supabase
-            .from('attendance')
-            .select('*')
-            .eq('room', classData.room)
-            .eq('class_id', classId)
-            .order('timestamp', { ascending: false })
-
-          if (attendanceError) throw attendanceError
-
-          if (attendanceData) {
-            setAttendances(attendanceData)
-          }
+        if (attendanceData) {
+          setAttendances(attendanceData)
         }
       } catch (error) {
         console.error('Error fetching attendance:', error)
@@ -84,17 +62,17 @@ const AttendanceList = ({ classId }: AttendanceListProps) => {
     })
   }
 
-  function formatTime(dateString: string) {
-    return new Date(dateString).toLocaleTimeString('es-ES', {
-      hour: '2-digit',
-      minute: '2-digit'
-    })
+  const formatStudentName = (name: string) => {
+    if (name.startsWith('Desconocido_')) {
+      return 'Persona Desconocida'
+    }
+    return name
   }
 
   if (isLoading) {
     return (
       <div className="flex justify-center items-center min-h-[200px]">
-        <p className="text-default-500">Cargando asistencia...</p>
+        <p className="text-xl text-default-500">Cargando asistencia...</p>
       </div>
     )
   }
@@ -108,53 +86,46 @@ const AttendanceList = ({ classId }: AttendanceListProps) => {
   }
 
   return (
-    <div className="space-y-6">
-      {classDetails && (
-        <Card className="w-full bg-default-50">
-          <CardBody className="py-3">
-            <div className="flex items-center justify-between flex-wrap gap-2">
-              <div className="flex items-center gap-2">
-                <Clock className="w-4 h-4" />
-                <span>
-                  {formatTime(classDetails.start_time)} - {formatTime(classDetails.end_time)}
-                </span>
-              </div>
-              <Chip color="primary" variant="flat">
-                Sala {classDetails.room}
-              </Chip>
-            </div>
-          </CardBody>
-        </Card>
-      )}
-      
+    <div className="space-y-6">      
       <div className="grid gap-4">
         {attendances.map((attendance) => (
-          <Card key={attendance.id} className="w-full">
-            <CardHeader className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-              <div className="space-y-1">
-                <h3 className="text-lg font-semibold">{attendance.student_name}</h3>
-                <p className="text-small text-default-500">
-                  {formatDateTime(attendance.timestamp)}
-                </p>
+          <Card key={attendance.id} className="bg-white/50 backdrop-blur-sm">
+            <CardBody className="p-6">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                <div className="space-y-1">
+                  <h3 className="text-lg font-semibold">
+                    {formatStudentName(attendance.student_name)}
+                  </h3>
+                  <p className="text-default-500">
+                    {formatDateTime(attendance.timestamp)}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Chip 
+                    color={attendance.confidence >= 0.8 ? "success" : "warning"} 
+                    variant="flat"
+                  >
+                    Confianza: {Math.round(attendance.confidence * 100)}%
+                  </Chip>
+                  <Chip 
+                    color={attendance.quality >= 0.8 ? "success" : "warning"} 
+                    variant="flat"
+                  >
+                    Calidad: {Math.round(attendance.quality * 100)}%
+                  </Chip>
+                  {attendance.student_name.startsWith('Desconocido_') && (
+                    <Chip
+                      color="danger"
+                      variant="flat"
+                    >
+                      No Identificado
+                    </Chip>
+                  )}
+                </div>
               </div>
-              <div className="flex flex-wrap gap-2">
-                <Chip 
-                  color={attendance.confidence >= 0.8 ? "success" : "warning"} 
-                  variant="flat"
-                >
-                  Confianza: {Math.round(attendance.confidence * 100)}%
-                </Chip>
-                <Chip 
-                  color={attendance.quality >= 0.8 ? "success" : "warning"} 
-                  variant="flat"
-                >
-                  Calidad: {Math.round(attendance.quality * 100)}%
-                </Chip>
-              </div>
-            </CardHeader>
-            <CardBody className="pt-2">
-              <div className="flex items-center gap-4">
-                {attendance.image_path && (
+
+              {attendance.image_path && (
+                <div className="mt-4">
                   <div className="relative w-32 h-32 overflow-hidden rounded-lg">
                     <img 
                       src={attendance.image_path} 
@@ -163,15 +134,16 @@ const AttendanceList = ({ classId }: AttendanceListProps) => {
                       loading="lazy"
                     />
                   </div>
-                )}
-              </div>
+                </div>
+              )}
             </CardBody>
           </Card>
         ))}
+
         {attendances.length === 0 && (
           <div className="flex justify-center items-center min-h-[200px]">
-            <p className="text-default-500">
-              No hay registros de asistencia para esta clase
+            <p className="text-xl text-default-500">
+              No hay registros de asistencia para esta sala
             </p>
           </div>
         )}

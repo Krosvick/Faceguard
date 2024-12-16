@@ -8,52 +8,111 @@ import { redirect } from "next/navigation";
 export const signUpAction = async (formData: FormData) => {
   const email = formData.get("email")?.toString();
   const password = formData.get("password")?.toString();
+  const role = formData.get("role")?.toString();
+  
   const supabase = await createClient();
   const origin = (await headers()).get("origin");
 
-  if (!email || !password) {
-    return { error: "Email and password are required" };
+  if (!email || !password || !role) {
+    return encodedRedirect("error", "/sign-up", "Todos los campos son requeridos");
   }
 
-  const { error } = await supabase.auth.signUp({
+  // Primero, crear el usuario de autenticación
+  const { data: authData, error: authError } = await supabase.auth.signUp({
     email,
     password,
     options: {
       emailRedirectTo: `${origin}/auth/callback`,
+      data: {
+        role: role
+      }
     },
   });
 
-  if (error) {
-    console.error(error.code + " " + error.message);
-    return encodedRedirect("error", "/sign-up", error.message);
-  } else {
-    return encodedRedirect(
-      "success",
-      "/sign-up",
-      "Thanks for signing up! Please check your email for a verification link.",
-    );
+  if (authError) {
+    console.error(authError.code + " " + authError.message);
+    return encodedRedirect("error", "/sign-up", "Error al crear la cuenta");
   }
+
+  if (authData.user) {
+    if (role === "universidad") {
+      const universityName = formData.get("universityName")?.toString();
+      const location = formData.get("location")?.toString();
+
+      if (!universityName || !location) {
+        return encodedRedirect("error", "/sign-up", "Todos los campos son requeridos");
+      }
+
+      const { error: dbError } = await supabase
+        .from('universities')
+        .insert([
+          {
+            name: universityName,
+            location: location,
+            email: email,
+            auth_user_id: authData.user.id
+          }
+        ]);
+
+      if (dbError) {
+        console.error(dbError);
+        return encodedRedirect("error", "/sign-up", "Error al crear el perfil de universidad");
+      }
+    } else if (role === "profesor") {
+      const firstName = formData.get("firstName")?.toString();
+      const lastName = formData.get("lastName")?.toString();
+
+      if (!firstName || !lastName) {
+        return encodedRedirect("error", "/sign-up", "Todos los campos son requeridos");
+      }
+
+      const { error: dbError } = await supabase
+        .from('teachers')
+        .insert([
+          {
+            first_name: firstName,
+            last_name: lastName,
+            email: email,
+            auth_user_id: authData.user.id
+          }
+        ]);
+
+      if (dbError) {
+        console.error(dbError);
+        return encodedRedirect("error", "/sign-up", "Error al crear el perfil de profesor");
+      }
+    }
+  }
+
+  return encodedRedirect(
+    "success",
+    "/sign-up",
+    "¡Gracias por registrarte! Por favor, revisa tu correo electrónico para verificar tu cuenta.",
+  );
 };
 
 export const signInAction = async (formData: FormData) => {
-  const email = formData.get("email") as string;
-  const password = formData.get("password") as string;
+  const email = formData.get('email') as string
+  const password = formData.get('password') as string
   const supabase = await createClient();
 
   const { data, error } = await supabase.auth.signInWithPassword({
     email,
     password,
-  });
+  })
 
   if (error) {
-    return encodedRedirect("error", "/sign-in", error.message);
+    if (error.message.includes('Email not confirmed')) {
+      return { error: 'Email not confirmed' }
+    }
+    if (error.message.includes('Invalid login credentials')) {
+      return { error: 'Invalid credentials' }
+    }
+    return { error: error.message }
   }
 
-  return {
-    success: true,
-    user: data.user,
-  };
-};
+  return { success: true }
+}
 
 export const forgotPasswordAction = async (formData: FormData) => {
   const email = formData.get("email")?.toString();
